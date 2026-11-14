@@ -10,7 +10,7 @@ The goal is not just a fast kernel. It is a record of **why** each change helps,
 
 | Step | Change | Status |
 |---|---|---|
-| 1 | Benchmark harness and cuBLAS reference | in progress |
+| 1 | Benchmark harness and cuBLAS reference | done |
 | 2 | Naive Triton kernel, correct and tested | planned |
 | 3 | Tiling with data reuse, then autotuned block sizes | planned |
 | 4 | FP16 Tensor Cores, grouped program ordering, profiling | planned |
@@ -36,7 +36,25 @@ pytest
 
 Triton needs Linux and an NVIDIA GPU. Without one, the tests run Triton kernels on the CPU through its interpreter (`TRITON_INTERPRET=1`), which checks correctness but not speed. CI does exactly this.
 
-To benchmark on a GPU, open [`notebooks/benchmark_colab.ipynb`](notebooks/benchmark_colab.ipynb) in Google Colab with a T4 runtime and run all cells.
+To benchmark on a GPU, open the notebook in Colab with a T4 runtime and run all cells:
+
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kajalhoskul/triton-gemm-from-scratch/blob/main/notebooks/benchmark_colab.ipynb)
+
+Or from a shell on any machine with an NVIDIA GPU:
+
+```bash
+python -m gemm.bench --kernels torch --dtype float16 --sizes 512 1024 2048 4096
+```
+
+## Layout
+
+```
+gemm/reference.py   torch.matmul (cuBLAS) baseline
+gemm/bench.py       correctness check, timing, TFLOPS, CSV output
+tests/              harness tests and a Triton smoke test
+notebooks/          Colab notebook for GPU benchmarks
+results/            measured results, with hardware and versions
+```
 
 ## License
 
