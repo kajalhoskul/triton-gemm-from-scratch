@@ -11,10 +11,21 @@ The goal is not just a fast kernel. It is a record of **why** each change helps,
 | Step | Change | Status |
 |---|---|---|
 | 1 | Benchmark harness and cuBLAS reference | done |
-| 2 | Naive Triton kernel, correct and tested | planned |
+| 2 | Naive Triton kernel, correct and tested | done |
 | 3 | Tiling with data reuse, then autotuned block sizes | planned |
 | 4 | FP16 Tensor Cores, grouped program ordering, profiling | planned |
 | 5 | Results, charts and write-up | planned |
+
+## Step 2: the naive kernel
+
+[`gemm/naive.py`](gemm/naive.py) launches one Triton program per element of C. Each program walks along one row of A and one column of B in chunks of `BLOCK_K`, multiplies them element by element, and sums in FP32.
+
+It is correct for any shape and layout: masks handle sizes that are not multiples of `BLOCK_K`, and strides handle transposed inputs. But it is slow by design:
+
+- **No reuse.** Each value of A is read from global memory N times, and each value of B M times. For a 4096 x 4096 GEMM the kernel asks for about 2,700 times more data than the minimum of reading A and B once and writing C once (the GPU caches absorb part of it).
+- **No Tensor Cores.** It multiplies with plain vector arithmetic instead of `tl.dot`.
+
+Step 3 fixes the reuse problem, and step 4 brings in Tensor Cores.
 
 ## How performance is measured
 
@@ -51,7 +62,8 @@ python -m gemm.bench --kernels torch --dtype float16 --sizes 512 1024 2048 4096
 ```
 gemm/reference.py   torch.matmul (cuBLAS) baseline
 gemm/bench.py       correctness check, timing, TFLOPS, CSV output
-tests/              harness tests and a Triton smoke test
+gemm/naive.py       step 2: one Triton program per output element
+tests/              harness, Triton smoke test, kernel correctness tests
 notebooks/          Colab notebook for GPU benchmarks
 results/            measured results, with hardware and versions
 ```
