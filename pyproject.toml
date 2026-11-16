@@ -1,3 +1,11 @@
+[project]
+name = "triton-gemm-from-scratch"
+version = "0.2.0"
+description = "A matrix-multiply kernel in Triton, optimized step by step and measured against cuBLAS."
+authors = [{ name = "Kajal Changappa" }]
+license = "MIT"
+requires-python = ">=3.10"
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
