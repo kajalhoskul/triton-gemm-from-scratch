@@ -34,6 +34,13 @@ KERNELS: Dict[str, Kernel] = {
     "torch": torch_matmul,
 }
 
+try:  # Triton only installs on Linux; elsewhere only the reference is available.
+    from gemm.naive import naive_matmul
+
+    KERNELS["naive"] = naive_matmul
+except ImportError:
+    pass
+
 DTYPES = {
     "float32": torch.float32,
     "float16": torch.float16,
