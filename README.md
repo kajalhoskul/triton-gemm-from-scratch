@@ -1,5 +1,7 @@
 # Triton GEMM from scratch
 
+**Author:** [Kajal Changappa](https://github.com/kajalhoskul)
+
 [![CI](https://github.com/kajalhoskul/triton-gemm-from-scratch/actions/workflows/ci.yml/badge.svg)](https://github.com/kajalhoskul/triton-gemm-from-scratch/actions/workflows/ci.yml)
 
 Writing a matrix-multiply (GEMM) kernel in [Triton](https://triton-lang.org), starting from the simplest correct version and optimizing it step by step, with every step measured against cuBLAS (`torch.matmul`) on a real NVIDIA GPU.
@@ -68,6 +70,14 @@ notebooks/          Colab notebook for GPU benchmarks
 results/            measured results, with hardware and versions
 ```
 
+## Testing
+
+Every test, what it checks and why it exists is listed in [docs/TEST_CASES.md](docs/TEST_CASES.md).
+
+## Author
+
+Built by **Kajal Changappa** ([@kajalhoskul](https://github.com/kajalhoskul)).
+
 ## License
 
-MIT
+MIT © 2026 Kajal Changappa
