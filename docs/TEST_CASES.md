@@ -1,8 +1,8 @@
 # Test cases
 
-**Project:** triton-gemm-from-scratch · **Author:** Kajal Changappa · **Covers:** steps 1 and 2
+**Project:** triton-gemm-from-scratch · **Author:** Kajal Changappa · **Covers:** steps 1 to 3
 
-27 automated test cases in 3 files. Run them with:
+57 automated test cases in 4 files. Run them with:
 
 ```bash
 pytest -v
@@ -13,7 +13,7 @@ pytest -v
 | Environment | Harness tests | Triton tests | What it proves |
 |---|---|---|---|
 | **GitHub Actions CI** (Ubuntu, CPU only, `TRITON_INTERPRET=1`) | ✅ run | ✅ run, through Triton's CPU interpreter | Every kernel computes the right answer on every push |
-| **Google Colab** (NVIDIA T4) | ✅ run | ✅ run, compiled for the GPU | The kernels also compile and run correctly on real hardware |
+| **Google Colab** (NVIDIA T4) | ✅ run | ✅ run, compiled for the GPU | The kernels also compile and run correctly on real hardware, and the autotuner (T-21) runs |
 | **macOS** (Triton cannot install) | ✅ run | ⏭️ skipped automatically | The harness works on any machine |
 
 ## How correctness is judged
@@ -106,6 +106,72 @@ These check that `naive_matmul` (step 2) gives the right answer for awkward inpu
 |---|---|---|---|---|
 | N-15 | `test_registered_in_benchmark` | Benchmark run of `naive`, 12×10×70 | Registered under the name `naive`; marked correct; TFLOPS > 0 | Confirms the kernel can be benchmarked by name, the way the Colab notebook does it. |
 
+## 4. Tiled and autotuned GEMM: `tests/test_tiled.py` (30 cases)
+
+Tiling adds failure modes the naive kernel didn't have: tiles that hang over the edge of the matrix, matrices smaller than one tile, and block sizes that must never change the answer. The default tile is **64 × 64**, with **BLOCK_K = 32**.
+
+### 4.1 Tile edges, FP32 (8 cases)
+
+`test_tiled_matches_torch_fp32` runs once per shape.
+
+| ID | Shape (M × N × K) | Edge case tested | Expected result |
+|---|---|---|---|
+| T-01 | 1 × 1 × 1 | Far smaller than one tile in every dimension: almost everything is masked | Output shape 1×1, FP32, matches `torch.matmul` |
+| T-02 | 64 × 64 × 32 | Exactly one tile and exactly one K step, with no masking at all | Matches |
+| T-03 | 128 × 64 × 96 | Whole tiles only: 2 × 1 tiles, 3 K steps | Matches |
+| T-04 | 65 × 64 × 32 | **M one past a tile edge**: a second tile row with only 1 valid row | Matches |
+| T-05 | 64 × 65 × 32 | **N one past a tile edge** | Matches |
+| T-06 | 64 × 64 × 33 | **K one past a step**: the last K step loads just 1 column of A | Matches |
+| T-07 | 100 × 70 × 50 | **Partial tiles in M, N and K at the same time** | Matches |
+| T-08 | 3 × 130 × 7 | Very wide and very short: 3 tiles side by side, each mostly empty | Matches |
+
+### 4.2 Data types (2 cases)
+
+| ID | Test | Shape | Expected result | Why it matters |
+|---|---|---|---|---|
+| T-09 | `test_tiled_matches_torch_fp16` | 64 × 64 × 32 | Output FP16; matches | FP16 tiles go through `tl.dot` with an FP32 accumulator, which is the path to Tensor Cores in step 4. |
+| T-10 | `test_tiled_matches_torch_fp16` | 100 × 70 × 50 | Same | FP16 with partial tiles. |
+
+### 4.3 Block sizes (3 cases)
+
+`test_block_sizes_do_not_change_the_answer`, on a 70 × 90 × 110 problem.
+
+| ID | BLOCK_M × BLOCK_N × BLOCK_K | Expected result | Why it matters |
+|---|---|---|---|
+| T-11 | 16 × 16 × 16 | Same answer as the default tile | The smallest tile `tl.dot` allows. |
+| T-12 | 32 × 64 × 16 | Same | A non-square tile. |
+| T-13 | 128 × 32 × 64 | Same | A tall tile with a large K step. |
+
+### 4.4 Behaviour and layout (3 cases)
+
+| ID | Test | Input | Expected result | Why it matters |
+|---|---|---|---|---|
+| T-14 | `test_tiled_agrees_with_naive` | 40 × 30 × 50 | Tiled and naive outputs agree | Each step must give the same answer as the step before it. |
+| T-15 | `test_transposed_inputs_use_strides` | Transposed views, 70 × 40 and 40 × 80 | Inputs confirmed non-contiguous; output matches | 2-D pointer grids must follow the strides, not assume row-major layout. |
+| T-16 | `test_zero_k_gives_zeros` | A is 5×0, B is 0×6 | A 5×6 matrix of zeros | Handled before launch, so no tile loop runs on an empty K. |
+
+### 4.5 Input validation (3 cases)
+
+| ID | Test | Input | Expected result | Why it matters |
+|---|---|---|---|---|
+| T-17 | `test_rejects_invalid_block_size` | `block_m = 8` | `ValueError` mentioning "power of two" | `tl.dot` needs every tile dimension to be at least 16. |
+| T-18 | `test_rejects_invalid_block_size` | `block_m = 48` | `ValueError` mentioning "power of two" | Triton block shapes must be powers of two. |
+| T-19 | `test_rejects_mismatched_inner_dimension` | A is 3×4, B is 5×6 | `ValueError` mentioning "inner dimensions" | Same guard as the naive kernel. |
+
+### 4.6 Autotuning (10 cases)
+
+| ID | Test | Input | Expected result | Why it matters |
+|---|---|---|---|---|
+| T-20a to T-20h | `test_every_autotune_config_is_correct` (one case per config: 128×128×32, 128×128×16, 128×64×32, 64×128×32, 64×64×32, 64×64×64, 32×64×32, 32×32×32) | 72 × 40 × 56 with that config's block sizes | Matches `torch.matmul` | The autotuner may pick **any** of these, so each must be correct on its own. Runs in CI. |
+| T-21 | `test_autotuned_matches_torch_and_records_choice` | 72 × 40 × 56 through `autotuned_matmul` | No config cached before the call; output matches; afterwards a config is cached, and it's one of the 8 candidates | Checks the full autotune path end to end. **GPU only:** the autotuner times configs on a GPU, and the CPU interpreter has no GPU driver. Runs on Colab, skipped in CI. |
+| T-22 | `test_autotune_configs_are_valid` | All 8 configs | Every block size is a power of two ≥ 16 | Catches a bad config before it can fail at compile time. |
+
+### 4.7 Integration (1 case)
+
+| ID | Test | Input | Expected result | Why it matters |
+|---|---|---|---|---|
+| T-23 | `test_registered_in_benchmark` | Benchmark run of `tiled`, 48 × 40 × 72 | `tiled` and `autotuned` registered by name; marked correct; TFLOPS > 0 | Confirms the Colab notebook can benchmark both by name. |
+
 ---
 
 ## Coverage summary
@@ -118,11 +184,18 @@ These check that `naive_matmul` (step 2) gives the right answer for awkward inpu
 | Naive kernel: types | 2 | FP16 with FP32 accumulation |
 | Naive kernel: behaviour | 3 | Chunk-size independence, strided inputs, empty K |
 | Naive kernel: validation | 2 | Shape and dtype errors |
-| Integration | 1 | Registered and benchmarked by name |
-| **Total** | **27** | |
+| Naive kernel: integration | 1 | Registered and benchmarked by name |
+| Tiled kernel: tile edges | 8 | Smaller than a tile, exact tiles, one past each edge in M, N and K, all three at once |
+| Tiled kernel: types | 2 | FP16 through `tl.dot` with an FP32 accumulator |
+| Tiled kernel: block sizes | 3 | Smallest, non-square and tall tiles give the same answer |
+| Tiled kernel: behaviour | 3 | Agrees with naive, strided inputs, empty K |
+| Tiled kernel: validation | 3 | Invalid block sizes, shape errors |
+| Autotuning | 10 | Every candidate config is correct, full autotune path (GPU), config sanity |
+| Tiled kernel: integration | 1 | Both kernels registered and benchmarked by name |
+| **Total** | **57** | 56 run in CI; T-21 runs on GPU only |
 
 ### Not yet covered (planned)
 
 - **Large shapes on a real GPU** (512 to 4096). These run in the Colab notebook rather than CI, because the CPU interpreter is too slow for them.
 - **BF16** inputs: in step 4, alongside Tensor Cores.
-- **Tiled and autotuned kernels:** in step 3, which will reuse every case above.
+- **Grouped program ordering:** in step 4, which will reuse the tile-edge cases above.

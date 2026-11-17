@@ -14,7 +14,7 @@ The goal is not just a fast kernel. It is a record of **why** each change helps,
 |---|---|---|
 | 1 | Benchmark harness and cuBLAS reference | done |
 | 2 | Naive Triton kernel, correct and tested | done |
-| 3 | Tiling with data reuse, then autotuned block sizes | planned |
+| 3 | Tiling with data reuse, then autotuned block sizes | done |
 | 4 | FP16 Tensor Cores, grouped program ordering, profiling | planned |
 | 5 | Results, charts and write-up | planned |
 
@@ -28,6 +28,20 @@ It is correct for any shape and layout: masks handle sizes that are not multiple
 - **No Tensor Cores.** It multiplies with plain vector arithmetic instead of `tl.dot`.
 
 Step 3 fixes the reuse problem, and step 4 brings in Tensor Cores.
+
+## Step 3: tiling and autotuning
+
+[`gemm/tiled.py`](gemm/tiled.py) gives each program a `BLOCK_M x BLOCK_N` **tile** of C instead of a single value. For every step along K it loads one tile of A and one tile of B and multiplies them with `tl.dot`:
+
+| Per K step | Naive (step 2) | Tiled, 64 x 64 x 32 (step 3) |
+|---|---|---|
+| Values loaded | 2 · 32 = 64 | 64·32 + 32·64 = 4,096 |
+| Multiply-adds | 32 | 64 · 64 · 32 = 131,072 |
+| **Multiply-adds per value loaded** | **0.5** | **32** |
+
+That ratio, the *arithmetic intensity*, is the whole point. A GPU can do far more arithmetic per second than it can fetch values from memory, so a kernel that does 0.5 multiply-adds per value spends nearly all its time waiting for memory. Reusing each loaded value across a whole row or column of the tile raises the ratio 64-fold.
+
+**Why autotune?** Bigger tiles mean more reuse, but they need more registers and shared memory, and they leave fewer tiles to spread across the GPU's processors. The best balance depends on the GPU and the matrix shape. `autotuned_matmul` lets Triton time [8 tile configurations](gemm/tiled.py) on the first call for each shape and keep the fastest. The configurations are sized for a T4's 64 KB of shared memory; any that don't fit on a given GPU are skipped.
 
 ## How performance is measured
 
@@ -65,6 +79,7 @@ python -m gemm.bench --kernels torch --dtype float16 --sizes 512 1024 2048 4096
 gemm/reference.py   torch.matmul (cuBLAS) baseline
 gemm/bench.py       correctness check, timing, TFLOPS, CSV output
 gemm/naive.py       step 2: one Triton program per output element
+gemm/tiled.py       step 3: one program per tile, tl.dot, autotuning
 tests/              harness, Triton smoke test, kernel correctness tests
 notebooks/          Colab notebook for GPU benchmarks
 results/            measured results, with hardware and versions

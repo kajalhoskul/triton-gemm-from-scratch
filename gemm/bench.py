@@ -36,8 +36,11 @@ KERNELS: Dict[str, Kernel] = {
 
 try:  # Triton only installs on Linux; elsewhere only the reference is available.
     from gemm.naive import naive_matmul
+    from gemm.tiled import autotuned_matmul, tiled_matmul
 
     KERNELS["naive"] = naive_matmul
+    KERNELS["tiled"] = tiled_matmul
+    KERNELS["autotuned"] = autotuned_matmul
 except ImportError:
     pass
 
