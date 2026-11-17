@@ -103,6 +103,21 @@ def test_rejects_mismatched_inner_dimension():
         tiled_matmul(torch.zeros(3, 4, device=DEVICE), torch.zeros(5, 6, device=DEVICE))
 
 
+@pytest.mark.parametrize(
+    "config", AUTOTUNE_CONFIGS,
+    ids=lambda c: "{BLOCK_M}x{BLOCK_N}x{BLOCK_K}".format(**c.kwargs),
+)
+def test_every_autotune_config_is_correct(config):
+    # The autotuner may pick any of these, so each one must be correct on its
+    # own. Runs everywhere, including CI without a GPU.
+    m, n, k = 72, 40, 56
+    a, b = bench.make_inputs(m, n, k, device=DEVICE)
+    kw = config.kwargs
+    out = tiled_matmul(a, b, block_m=kw["BLOCK_M"], block_n=kw["BLOCK_N"], block_k=kw["BLOCK_K"])
+    assert_matches_torch(a, b, out)
+
+
+@pytest.mark.skipif(DEVICE == "cpu", reason="the autotuner times configs on a real GPU; the interpreter has no GPU driver")
 def test_autotuned_matches_torch_and_records_choice():
     m, n, k = 72, 40, 56
     a, b = bench.make_inputs(m, n, k, device=DEVICE)
