@@ -41,6 +41,11 @@ try:  # Triton only installs on Linux; elsewhere only the reference is available
     KERNELS["naive"] = naive_matmul
     KERNELS["tiled"] = tiled_matmul
     KERNELS["autotuned"] = autotuned_matmul
+
+    from gemm.fast import fast_matmul, grouped_matmul
+
+    KERNELS["grouped"] = grouped_matmul
+    KERNELS["fast"] = fast_matmul
 except ImportError:
     pass
 

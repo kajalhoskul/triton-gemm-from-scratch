@@ -15,7 +15,7 @@ The goal is not just a fast kernel. It is a record of **why** each change helps,
 | 1 | Benchmark harness and cuBLAS reference | done |
 | 2 | Naive Triton kernel, correct and tested | done |
 | 3 | Tiling with data reuse, then autotuned block sizes | done |
-| 4 | FP16 Tensor Cores, grouped program ordering, profiling | planned |
+| 4 | FP16 Tensor Cores, grouped program ordering, roofline analysis | done |
 | 5 | Results, charts and write-up | planned |
 
 ## Step 2: the naive kernel
@@ -42,6 +42,30 @@ Step 3 fixes the reuse problem, and step 4 brings in Tensor Cores.
 That ratio, the *arithmetic intensity*, is the whole point. A GPU can do far more arithmetic per second than it can fetch values from memory, so a kernel that does 0.5 multiply-adds per value spends nearly all its time waiting for memory. Reusing each loaded value across a whole row or column of the tile raises the ratio 64-fold.
 
 **Why autotune?** Bigger tiles mean more reuse, but they need more registers and shared memory, and they leave fewer tiles to spread across the GPU's processors. The best balance depends on the GPU and the matrix shape. `autotuned_matmul` lets Triton time [8 tile configurations](gemm/tiled.py) on the first call for each shape and keep the fastest. The configurations are sized for a T4's 64 KB of shared memory; any that don't fit on a given GPU are skipped.
+
+## Step 4: Tensor Cores, grouped ordering and the roofline
+
+[`gemm/fast.py`](gemm/fast.py) keeps the step 3 tiling and changes two things.
+
+**1. FP16 inputs, FP32 accumulator.** When both tiles passed to `tl.dot` are FP16, Triton compiles it to Tensor Core instructions. On a T4 their peak is **65 TFLOPS**, against **8.1 TFLOPS** for ordinary FP32 maths. Sums are still kept in FP32, so error doesn't build up with K: a test adds 4,096 ones and checks the answer is exactly 4,096, where an FP16 running sum would get stuck at 2,048. FP16 also halves the bytes per value, so tiles cost half the memory traffic and half the shared memory.
+
+**2. Grouped tile ordering.** GPUs start programs roughly in order of their id, and programs running together share the L2 cache. Here is which program computes which tile:
+
+```
+row-major (step 3)       grouped, GROUP_M = 2 (step 4)
+ 0  1  2  3                0  2  4  6
+ 4  5  6  7                1  3  5  7
+ 8  9 10 11                8 10 12 14
+12 13 14 15                9 11 13 15
+```
+
+In row-major order, programs 0 to 3 need 1 row of A tiles and **4** columns of B tiles. Grouped, they need 2 rows and 2 columns, so fewer distinct tiles for the same work, and more cache hits. [`gemm/ordering.py`](gemm/ordering.py) models this mapping in plain Python, and its tests prove that every tile is computed exactly once for every grid shape and group size.
+
+**3. Roofline analysis.** [`gemm/roofline.py`](gemm/roofline.py) answers the question "how good is this number?". A kernel is capped either by the GPU's peak FLOP rate or by memory bandwidth × arithmetic intensity, whichever is lower. For each benchmark result it reports the ceiling, whether the shape is compute-bound or memory-bound, and the percentage of the ceiling reached. A square 4096 FP16 GEMM, for example, does 1,365 FLOPs per byte at minimum traffic. That puts its memory ceiling far above 65 TFLOPS, so it's compute-bound, and any shortfall is in the kernel, not the memory system.
+
+```bash
+python -m gemm.roofline results/t4_fp16.csv
+```
 
 ## How performance is measured
 
@@ -80,6 +104,9 @@ gemm/reference.py   torch.matmul (cuBLAS) baseline
 gemm/bench.py       correctness check, timing, TFLOPS, CSV output
 gemm/naive.py       step 2: one Triton program per output element
 gemm/tiled.py       step 3: one program per tile, tl.dot, autotuning
+gemm/fast.py        step 4: FP16 Tensor Cores and grouped tile ordering
+gemm/ordering.py    plain-Python model of the tile ordering
+gemm/roofline.py    roofline model: attainable TFLOPS and % of it reached
 tests/              harness, Triton smoke test, kernel correctness tests
 notebooks/          Colab notebook for GPU benchmarks
 results/            measured results, with hardware and versions
