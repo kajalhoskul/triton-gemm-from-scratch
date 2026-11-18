@@ -1,8 +1,8 @@
 # Test cases
 
-**Project:** triton-gemm-from-scratch · **Author:** Kajal Changappa · **Covers:** steps 1 to 3
+**Project:** triton-gemm-from-scratch · **Author:** Kajal Changappa · **Covers:** steps 1 to 4
 
-57 automated test cases in 4 files. Run them with:
+138 automated test cases in 7 files. Run them with:
 
 ```bash
 pytest -v
@@ -13,8 +13,8 @@ pytest -v
 | Environment | Harness tests | Triton tests | What it proves |
 |---|---|---|---|
 | **GitHub Actions CI** (Ubuntu, CPU only, `TRITON_INTERPRET=1`) | ✅ run | ✅ run, through Triton's CPU interpreter | Every kernel computes the right answer on every push |
-| **Google Colab** (NVIDIA T4) | ✅ run | ✅ run, compiled for the GPU | The kernels also compile and run correctly on real hardware, and the autotuner (T-21) runs |
-| **macOS** (Triton cannot install) | ✅ run | ⏭️ skipped automatically | The harness works on any machine |
+| **Google Colab** (NVIDIA T4) | ✅ run | ✅ run, compiled for the GPU | The kernels also compile and run correctly on real hardware, and the autotuners (T-21, F-21) run |
+| **macOS** (Triton cannot install) | ✅ run, plus the ordering and roofline tests | ⏭️ skipped automatically | The harness and the performance models work on any machine |
 
 ## How correctness is judged
 
@@ -172,6 +172,95 @@ Tiling adds failure modes the naive kernel didn't have: tiles that hang over the
 |---|---|---|---|---|
 | T-23 | `test_registered_in_benchmark` | Benchmark run of `tiled`, 48 × 40 × 72 | `tiled` and `autotuned` registered by name; marked correct; TFLOPS > 0 | Confirms the Colab notebook can benchmark both by name. |
 
+## 5. FP16 Tensor Core GEMM: `tests/test_fast.py` (29 cases)
+
+Grouped ordering changes **which program computes which tile**. A wrong mapping would leave some tiles of C unwritten, or write them twice, so these tests use tile grids where the last group is only partly full, and check every output value.
+
+### 5.1 Group sizes (5 cases)
+
+`test_every_group_size_fills_every_tile`: an 80 × 48 × 40 FP16 problem with 16 × 16 tiles, which is a **5 × 3 tile grid**.
+
+| ID | GROUP_M | What happens to the 5 tile rows | Expected result |
+|---|---|---|---|
+| F-01 | 1 | 5 groups of 1, the same as row-major order | Matches `torch.matmul` |
+| F-02 | 2 | Groups of 2, 2 and a **partial group of 1** | Matches |
+| F-03 | 3 | A group of 3 and a **partial group of 2** | Matches |
+| F-04 | 5 | Exactly one full group | Matches |
+| F-05 | 8 | One group **larger than the grid**, clipped to 5 rows | Matches |
+
+### 5.2 Shapes, FP16, default 64 × 64 × 32 tiles with GROUP_M = 8 (5 cases)
+
+| ID | Shape (M × N × K) | Edge case tested | Expected result |
+|---|---|---|---|
+| F-06 | 1 × 1 × 1 | One tile, almost entirely masked | Shape 1×1, FP16, matches |
+| F-07 | 64 × 64 × 32 | Exactly one tile, no masking | Matches |
+| F-08 | 200 × 72 × 40 | 4 × 2 tiles: a single **partial group** (4 rows < 8) | Matches |
+| F-09 | 520 × 130 × 70 | 9 × 3 tiles: **one full group of 8 plus a group of 1**, with partial edges in M, N and K | Matches |
+| F-10 | 33 × 300 × 129 | Wide, with partial tiles everywhere | Matches |
+
+### 5.3 Behaviour (5 cases)
+
+| ID | Test | Input | Expected result | Why it matters |
+|---|---|---|---|---|
+| F-11 | `test_grouped_works_in_fp32` | 100 × 70 × 50, FP32 | Matches | The kernel isn't limited to FP16. |
+| F-12 | `test_grouped_agrees_with_tiled` | 150 × 90 × 60 FP16, the same 32 × 32 × 32 tiles in both kernels | Grouped output equals step 3 tiled output | Only the order changes, never the result. |
+| F-13 | `test_fp16_accumulates_in_fp32` | All-ones 16 × 4096 times 4096 × 16, FP16 | Every output is **exactly 4096** | An FP16 running sum would get stuck at 2,048, where the gap between FP16 numbers is 2. This proves the accumulator is FP32. |
+| F-14 | `test_transposed_inputs_use_strides` | Transposed FP16 views | Inputs confirmed non-contiguous; output matches | Strides are still followed under the new ordering. |
+| F-15 | `test_zero_k_gives_zeros` | A is 5×0, B is 0×6, FP16 | Zeros | Empty K is handled before launch. |
+
+### 5.4 Input validation (3 cases)
+
+| ID | Input | Expected result |
+|---|---|---|
+| F-16 | `block_k = 8` | `ValueError` mentioning "power of two" (`tl.dot` needs ≥ 16) |
+| F-17 | `block_n = 96` | `ValueError` mentioning "power of two" |
+| F-18 | `group_m = 0` | `ValueError` mentioning "group_m" (a group of 0 would divide by zero) |
+
+### 5.5 Autotuning (11 cases)
+
+| ID | Test | Expected result | Why it matters |
+|---|---|---|---|
+| F-19a to F-19h | `test_every_fast_config_is_correct` (one case per config: 128×128×32 with 4 warps and 4 stages, 128×128×32 w8 s3, 128×128×64 w8 s2, 128×64×32 w4 s4, 64×128×32 w4 s4, 64×64×64 w4 s3, 64×64×32 w4 s4, 128×32×32 w4 s4) on 150 × 140 × 100 FP16 | Matches `torch.matmul` | The autotuner may pick any of them, so each must be correct. Runs in CI. |
+| F-20 | `test_fast_configs_fit_t4_shared_memory` | Every config needs ≤ 64 KB: (BLOCK_M·BLOCK_K + BLOCK_K·BLOCK_N) × 2 bytes × stages | A config that can't fit on the target GPU is wasted autotuning time. |
+| F-21 | `test_fast_matmul_autotunes_and_matches_torch` | On 256 × 192 × 128 FP16: output matches; the chosen config is one of the 8 | The full autotune path. **GPU only** (the autotuner needs a GPU driver), so it runs on Colab and is skipped in CI. |
+
+### 5.6 Integration (1 case)
+
+| ID | Test | Expected result |
+|---|---|---|
+| F-22 | `test_registered_in_benchmark` | `grouped` and `fast` registered by name; a benchmark run is marked correct with TFLOPS > 0 |
+
+## 6. Tile ordering model: `tests/test_ordering.py` (41 cases)
+
+Pure Python, so these run everywhere, including the Mac. [`gemm/ordering.py`](../gemm/ordering.py) is the plain-Python model of the mapping in the step 4 kernel.
+
+| ID | Test | Input | Expected result | Why it matters |
+|---|---|---|---|---|
+| O-01 to O-32 | `test_every_tile_visited_exactly_once` | **8 tile grids** (1×1, 4×4, 5×3, 7×2, 3×9, 16×16, 1×10, 10×1) × **4 group sizes** (1, 2, 3, 8) | The program-to-tile mapping is a **one-to-one cover**: M·N programs, and every tile appears exactly once | The core property. A tile visited twice wastes work, and a tile never visited leaves garbage in C. |
+| O-33 | `test_matches_the_documented_4x4_example` | 4 × 4 grid, GROUP_M = 2 | Matches the picture in the docstring and the README | The documentation and the code agree. |
+| O-34 | `test_group_of_one_is_row_major` | 5 × 7 grid, GROUP_M = 1 | The same as step 3's order for every program | Grouping generalises row-major order rather than replacing it. |
+| O-35 | `test_last_group_can_be_partial` | 5 × 3 grid, GROUP_M = 2 | Programs 12 to 14 map to tile row 4, columns 0 to 2 | The partial final group is handled. |
+| O-36 | `test_grouping_needs_fewer_distinct_tiles` | First 16 programs on a 16 × 16 grid | Row-major needs 1 row + 16 columns = **17 tiles**; grouped (GROUP_M = 4) needs 4 + 4 = **8 tiles** | Shows **why** grouping helps L2 cache reuse, with numbers. |
+| O-37 to O-41 | `test_cdiv` | (0,4), (1,4), (4,4), (5,4), (130,64) | 0, 1, 1, 2, 3 | Rounding up tile counts, the most common off-by-one source. |
+
+## 7. Roofline model: `tests/test_roofline.py` (11 cases)
+
+Pure Python. T4 peaks from NVIDIA's specifications: 8.1 TFLOPS FP32, 65 TFLOPS FP16 Tensor Core, 320 GB/s memory.
+
+| ID | Test | Input | Expected result | Why it matters |
+|---|---|---|---|---|
+| R-01 | `test_min_bytes_reads_a_and_b_and_writes_c_once` | 2 × 3 × 4, FP16 | (8 + 12 + 6) × 2 = 52 bytes | The minimum traffic every GEMM must pay. |
+| R-02 | `test_intensity_of_square_gemm` | 4096³ in FP16 and FP32 | 2N / (3 × bytes): 1,365 and 683 FLOPs per byte | Matches the closed-form formula. |
+| R-03 | `test_fp16_doubles_intensity_over_fp32` | 512³ | FP16 intensity = 2 × FP32 intensity | Half the bytes for the same FLOPs. |
+| R-04 | `test_peak_depends_on_dtype` | T4 | FP16 gives 65.0, FP32 gives 8.1 | Each dtype is judged against the right ceiling. |
+| R-05 | `test_low_intensity_is_memory_bound` | 10 FLOP/B | 10 × 320 GB/s = 3.2 TFLOPS | The memory ceiling. |
+| R-06 | `test_high_intensity_is_compute_bound` | 10,000 FLOP/B | Capped at 65 TFLOPS | The compute ceiling. |
+| R-07 | `test_skinny_gemm_is_memory_bound_on_t4` | 4096 × 4096 × 16, FP16 | "memory", with a ceiling below 65 TFLOPS | Small K means little reuse, so it's memory-bound. |
+| R-08 | `test_large_square_fp16_gemm_is_compute_bound_on_t4` | 4096³ FP16 measured at 32.5 TFLOPS | "compute"; ceiling 65; **50.0 %** of ceiling | The percentage that will go in the results. |
+| R-09 | `test_analyze_file_reads_bench_csv` | A CSV with one correct and one wrong result | Only the correct row is analysed, with the right ceiling | A wrong kernel never gets a performance score. |
+| R-10 | `test_analyze_file_rejects_unknown_gpu` | A CSV from "cpu" | `ValueError` "no GPU spec", unless a custom spec is passed | No made-up peaks for unknown hardware. |
+| R-11 | `test_cli_prints_table` | `python -m gemm.roofline file.csv` | The table shows the kernel, the size and "compute" | The command the Colab notebook runs. |
+
 ---
 
 ## Coverage summary
@@ -192,10 +281,18 @@ Tiling adds failure modes the naive kernel didn't have: tiles that hang over the
 | Tiled kernel: validation | 3 | Invalid block sizes, shape errors |
 | Autotuning | 10 | Every candidate config is correct, full autotune path (GPU), config sanity |
 | Tiled kernel: integration | 1 | Both kernels registered and benchmarked by name |
-| **Total** | **57** | 56 run in CI; T-21 runs on GPU only |
+| Grouped kernel: group sizes | 5 | Full, partial and oversized groups |
+| Grouped kernel: shapes | 5 | One tile, partial groups, full plus partial groups, edges everywhere |
+| Grouped kernel: behaviour | 5 | FP32 support, agrees with tiled, FP32 accumulation proof, strides, empty K |
+| Grouped kernel: validation | 3 | Block sizes, group size |
+| Fast kernel: autotuning | 11 | Every config correct, every config fits 64 KB, full autotune path (GPU) |
+| Grouped kernel: integration | 1 | Registered and benchmarked by name |
+| Tile ordering model | 41 | One-to-one cover over 32 grid and group combinations, docs example, row-major special case, partial group, cache benefit, `cdiv` |
+| Roofline model | 11 | Minimum bytes, intensity, both ceilings, bound classification, CSV analysis, CLI |
+| **Total** | **138** | 136 run in CI; T-21 and F-21 run on GPU only |
 
 ### Not yet covered (planned)
 
 - **Large shapes on a real GPU** (512 to 4096). These run in the Colab notebook rather than CI, because the CPU interpreter is too slow for them.
-- **BF16** inputs: in step 4, alongside Tensor Cores.
-- **Grouped program ordering:** in step 4, which will reuse the tile-edge cases above.
+- **BF16** inputs: the T4 (Turing) has no BF16 Tensor Cores, so BF16 is left out rather than tested on hardware that can't run it fast.
+- **Measured L2 hit rates:** grouped ordering's cache benefit is shown by the model (O-36) and by benchmark speed, not by hardware counters.
